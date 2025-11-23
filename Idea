@@ -1,0 +1,349 @@
+
+
+## 1. Overall UE5 architecture
+
+Conceptually you build an **“Acoustic Engine” module** that sits beside the default sound system:
+
+* **Your system:**
+
+  * Does **geometry queries** (Chaos / Scene queries) to compute:
+
+    * Occlusion / transmission
+    * Basic early reflections
+    * “Room” characterization (cave, hallway, outdoor)
+  * Outputs: per-source parameters:
+
+    * `Gain`, `LPF/HPF cutoff`, `EarlyReflectionTaps`, `ReverbSend`, maybe multipliers for HRTF spread.
+
+* **UE5 Audio system:**
+
+  * Handles:
+
+    * Spatialization (HRTF/headphones)
+    * Attenuation curves
+    * Reverb / submix routing
+    * MetaSounds / DSP
+
+Your plugin = **high-level controller** that feeds UE5 with correct parameters.
+
+---
+
+## 2. Spatialization & headphones (HRTF)
+
+Goal: **proper left/right (and elevation) over stereo headphones.**
+
+In UE5 you have:
+
+* **Spatialization plugins** (in Project Settings → Audio):
+
+  * Built-in panner
+  * HRTF-based plugins (e.g. Oculus, Resonance Audio, Steam Audio if you integrate, etc.)
+* You mark sounds as **spatialized** and UE passes 3D location + listener orientation into the panner.
+
+### Design decisions
+
+1. **Mandatory HRTF when “Headphone Mode” is active**
+
+   * Add a global setting: `EAudioOutputMode { Speakers, Headphones }`.
+   * When `Headphones`:
+
+     * Switch to an HRTF spatialization plugin.
+     * Clamp or modify distance curves so HRTF stays stable (too dry distant sounds can sound weird in binaural).
+
+2. **Per-source stereo width / spread**
+
+   * Some sounds shouldn’t be pure point sources:
+
+     * Gun in front of your face
+     * Large ambient river
+   * Add a parameter `SpatialWidth`:
+
+     * 0 = perfect point (full HRTF)
+     * 1 = more diffuse (blend between HRTF and non-spatialized / dual-mono feed).
+   * You implement this in a **MetaSound or custom source effect** that:
+
+     * Crossfades between:
+
+       * Spatialized mono signal
+       * Slightly decorrelated stereo bed
+
+3. **Occlusion interacts with spatialization**
+
+   * When fully occluded:
+
+     * Reduce high frequencies.
+     * Reduce **interaural level difference** slightly (strong occlusion tends to feel “centered and muffled”).
+   * Implementation: for strong occlusion, lower `SpatialWidth` slightly and apply heavier LPF.
+
+Result: For headphones, you get correct **left/right and front/back** with the HRTF plugin doing the heavy lifting; your plugin just modifies **what** gets sent to it.
+
+---
+
+## 3. Raytraced occlusion / reflections using UE5
+
+### 3.1 Geometry source
+
+Use:
+
+* A dedicated **“Audio Collision” channel** and simplified meshes:
+
+  * Either special Audio Proxy meshes
+  * Or reuse simplified collision / navmesh
+* Configure specific channels:
+
+  * `ECC_AudioOcclusion`
+  * Optionally `ECC_AudioPortal`
+
+### 3.2 Per-frame acoustic query
+
+For each **listener + relevant source** pair:
+
+1. **Direct occlusion ray**
+
+   * `LineTraceSingleByChannel` from listener to source using `ECC_AudioOcclusion`.
+   * If hit:
+
+     * Get hit material → map to `FAudioMaterial`:
+
+       * `LowAbsorption`, `MidAbsorption`, `HighAbsorption`, `Transmission`.
+     * Compute:
+
+       * Occlusion factor (0–1)
+       * LPF cutoff
+   * Distinguish:
+
+     * Solid wall → high occlusion
+     * Door / glass → partial transmission
+
+2. **Reflections**
+
+   * From **listener**, fire N rays (e.g. 16–32) in a hemisphere:
+
+     * `LineTraceSingleByChannel` or `Multi` if needed.
+     * First bounce only at first (you can add a second bounce later for “hero” sources).
+   * For each hit:
+
+     * Path length → delay
+     * Material → per-band absorption
+   * Cluster to 4–8 reflection taps by:
+
+     * Grouping hits by direction & distance, averaging.
+
+3. **Zone / cave detection**
+
+   * Use UE’s **Audio Volumes** or your own `AAcousticZoneVolume`:
+
+     * Each zone has:
+
+       * `BaseReverbPreset`
+       * `RT60`
+       * `HFDecay`
+       * `Density`
+       * Style flags (cave, hall, forest, small room)
+   * Listener’s current zone drives:
+
+     * Reverb submix settings
+     * Default reflection density and reverb send scaling.
+
+### 3.3 Cost control
+
+* **Global ray budget**:
+
+  * e.g. 200 rays / frame total
+* Per frame:
+
+  * Pick N most important sources (loudest, closest, flagged).
+  * For others: reuse cached occlusion / reflections for a few frames.
+
+---
+
+## 4. Runtime graph: MetaSounds, source effects, submixes
+
+### 4.1 Signal path (per sound)
+
+You want something like:
+
+`Sound Source → MetaSound Graph → Source Effects → Spatialization → Submix Bus(es)`
+
+Your plugin writes a **parameter struct** per source:
+
+* `float Occlusion`
+* `float LowPassCutoff`
+* `float ReverbSend`
+* `float SpatialWidth`
+* `FEarlyReflectionParams` (array of taps or summary)
+
+MetaSound / Source Effects:
+
+* **Occlusion filter**
+
+  * Simple 1–2 pole LPF, cutoff set via parameter.
+  * Optionally also reduce gain slightly.
+
+* **Early reflections**
+
+  * Implement as:
+
+    * 4–8 short delay lines with:
+
+      * Gain
+      * High-frequency rolloff
+  * Drive them from your ray clustering.
+
+* **Reverb routing**
+
+  * Use **Submix Send**:
+
+    * `DrySubmix` (direct sound)
+    * `ReverbSubmix` (convolution / algorithmic)
+  * Your engine sets `ReverbSend` per source based on zone + reflections.
+
+### 4.2 Global / submix structure
+
+Have at least:
+
+* `MasterSubmix`
+* `EnvironmentReverbSubmix`
+* `UI / Non-diegeticSubmix`
+
+Your plugin:
+
+* Controls **EnvironmentReverbSubmix** settings when the listener changes zones.
+* Blends between presets using smooth interpolation.
+
+---
+
+## 5. Optimisation knobs (exposed to designer/programmer)
+
+You should have a **single settings asset** e.g. `UAcousticSettings`:
+
+**Global:**
+
+* `MaxRaysPerFrame`
+* `MaxReflectionsPerSource`
+* `MaxBounces` (usually 1, maybe 2)
+* `MaxTraceDistance` (e.g. 50–100 m)
+* `UpdateRateHz` for:
+
+  * Occlusion
+  * Reflections
+  * Zone evaluation
+
+**Per source LOD:**
+
+* `EAcousticLOD { Off, Basic, Advanced, Hero }`
+
+  * `Off` = only distance attenuation
+  * `Basic` = direct ray + zone reverb
+  * `Advanced` = direct + reflections
+  * `Hero` = more rays, more frequent updates, maybe diffraction approximations
+
+**Realism vs Game Mix slider:**
+
+* `RealismFactor` 0–1:
+
+  * Scales max occlusion depth (never fully silent if < 1)
+  * Scales how strong reflections / reverb tails get.
+* `MinimumAudibilityDb`:
+
+  * Clamp so sounds don’t vanish completely except if explicitly culled.
+
+**Headphone mode:**
+
+* `bForceHRTFInHeadphones`
+* `HeadphoneReverbBoost` (e.g. 1.2× for caves to be more dramatic)
+* `HeadphoneDistanceDamp` (slightly compress perceived distance, since pure HRTF distance can feel too far)
+
+---
+
+## 6. Multiplayer behaviour
+
+**Key rule:**
+Server replicates *events and transforms*, clients do **all** acoustic work locally.
+
+### 6.1 What is replicated?
+
+For each sound source (actor):
+
+* Transform (position, rotation)
+* Velocity (optional, for doppler)
+* Audio type data:
+
+  * `BaseLoudness`
+  * `AcousticLOD`
+  * `IsHeroSource`
+* State:
+
+  * Is playing / stopped
+  * Loop / one-shot
+* Zone / portal states:
+
+  * Doors open/closed
+  * Moving walls, cave collapses etc.
+
+No rays, no filters, no reflection data is replicated.
+
+### 6.2 Per-listener context
+
+Each client:
+
+* Has its own **listener position** (camera).
+* Runs:
+
+  * Listener–source raytraces
+  * Acoustic LOD selection
+  * Parameter updates into MetaSounds / submixes.
+
+That means each player gets their own **correct headphone mix** from their POV.
+
+### 6.3 Consistency & determinism
+
+You *can* make behaviour semi-deterministic:
+
+* Use deterministic seeds for your reflection ray directions per `(SourceId, ListenerId)`.
+* But it’s not really necessary – audio is presentation-only.
+
+---
+
+## Putting it all together as a UE5 plugin
+
+Minimal feature set for v1:
+
+1. **C++ module `AcousticEngine`**
+
+   * Maintains list of active listeners and acoustic sources.
+   * Per tick:
+
+     * Enforces ray budget.
+     * Updates per-source occlusion & reflection params.
+
+2. **`AAcousticSourceComponent`**
+
+   * Wraps `UAudioComponent` or plugs into it.
+   * Exposes:
+
+     * `AcousticLOD`
+     * `Importance`
+     * Flags (`IsHero`, `Environmental`, etc.)
+   * Receives filter / reverb / width params from the engine and pushes into:
+
+     * MetaSound parameters or
+     * Source effect chain properties.
+
+3. **`AAcousticZoneVolume` + `AAcousticPortalVolume`**
+
+   * Designers place these in maps.
+   * Data: reverb preset, RT60, HFDecay, etc.
+
+4. **MetaSound template graph**
+
+   * Inputs: `Occlusion`, `LPFHz`, `ReverbSend`, `SpatialWidth`, `ReflectionTaps[N]`.
+   * Outputs: wet/dry signal routed into submixes.
+
+5. **Project settings panel**
+
+   * A single `UAcousticSettings` asset:
+
+     * Ray budgets, LOD thresholds, headphone mode options, realism slider.
+
+
