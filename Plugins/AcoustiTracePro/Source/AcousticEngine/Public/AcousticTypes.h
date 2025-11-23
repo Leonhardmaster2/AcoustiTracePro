@@ -126,6 +126,9 @@ struct ACOUSTICENGINE_API FAcousticMaterial
     {
         return (LowAbsorption + MidAbsorption + HighAbsorption) / 3.0f;
     }
+
+    /** Create material with default values for a given type */
+    static FAcousticMaterial CreateFromType(EAcousticMaterialType Type);
 };
 
 /**
@@ -352,6 +355,9 @@ struct ACOUSTICENGINE_API FAcousticZonePreset
     /** Default reverb send for this zone */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reverb", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float DefaultReverbSend = 0.3f;
+
+    /** Create preset with default values for a given zone type */
+    static FAcousticZonePreset CreateFromType(EAcousticZoneType Type);
 };
 
 /**
