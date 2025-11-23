@@ -1,0 +1,53 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.0.0",
+    "FriendlyName": "AcoustiTrace Pro",
+    "Description": "Advanced acoustic simulation engine with raytraced occlusion, reflections, HRTF spatialization, and zone-based reverb for realistic 3D audio in UE5.6",
+    "Category": "Audio",
+    "CreatedBy": "AcoustiTrace Team",
+    "CreatedByURL": "",
+    "DocsURL": "",
+    "MarketplaceURL": "",
+    "SupportURL": "",
+    "CanContainContent": true,
+    "IsBetaVersion": false,
+    "IsExperimentalVersion": false,
+    "Installed": false,
+    "EnabledByDefault": true,
+    "Modules": [
+        {
+            "Name": "AcousticEngine",
+            "Type": "Runtime",
+            "LoadingPhase": "PostConfigInit",
+            "PlatformAllowList": [
+                "Win64",
+                "Linux",
+                "Mac",
+                "PS5",
+                "XboxSeriesX",
+                "Switch"
+            ]
+        },
+        {
+            "Name": "AcousticEngineEditor",
+            "Type": "Editor",
+            "LoadingPhase": "PostEngineInit",
+            "PlatformAllowList": [
+                "Win64",
+                "Linux",
+                "Mac"
+            ]
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "Metasound",
+            "Enabled": true
+        },
+        {
+            "Name": "AudioModulation",
+            "Enabled": true
+        }
+    ]
+}
